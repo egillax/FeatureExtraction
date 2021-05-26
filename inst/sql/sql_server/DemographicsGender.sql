@@ -1,14 +1,15 @@
 -- Feature construction
 SELECT 
 	CAST(gender_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
-{@temporal} ? {
-    CAST(NULL AS INT) AS time_id,
-}		
 {@aggregated} ? {
 	cohort_definition_id,
 	COUNT(*) AS sum_value
 } : {
 	cohort.@row_id_field AS row_id,
+    {@temporal} ? {
+    CAST(NULL as DATE) as start_date,
+    CAST(NULL as DATE) as end_date,
+    }
 	1 AS covariate_value 
 }
 INTO @covariate_table

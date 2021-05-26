@@ -1,22 +1,24 @@
 -- Feature construction
 SELECT 
 	CAST(@domain_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
-{@temporal} ? {
-    time_id,
-}	
 {@aggregated} ? {
 	cohort_definition_id,
 	COUNT(*) AS sum_value
 } : {
 	row_id,
-	1 AS covariate_value 
+  {@temporal} ? {
+    start_date,
+    end_date,
+}
+	1 AS covariate_value
 }
 INTO @covariate_table
 FROM (
 	SELECT DISTINCT @domain_concept_id,
 {@temporal} ? {
-		time_id,
-}	
+		@domain_start_date as start_date,
+        @domain_end_date as end_date,
+}
 {@aggregated} ? {
 		cohort_definition_id,
 		cohort.subject_id,
@@ -28,9 +30,6 @@ FROM (
 	INNER JOIN @cdm_database_schema.@domain_table
 		ON cohort.subject_id = @domain_table.person_id
 {@temporal} ? {
-	INNER JOIN #time_period time_period
-		ON @domain_start_date <= DATEADD(DAY, time_period.end_day, cohort.cohort_start_date)
-		AND @domain_end_date >= DATEADD(DAY, time_period.start_day, cohort.cohort_start_date)
 	WHERE @domain_concept_id != 0
 } : {
 	WHERE @domain_start_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
@@ -46,9 +45,6 @@ FROM (
 {@aggregated} ? {		
 GROUP BY cohort_definition_id,
 	@domain_concept_id
-{@temporal} ? {
-    ,time_id
-} 
 } 
 ;
 

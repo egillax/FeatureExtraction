@@ -610,17 +610,18 @@ public class FeatureExtraction {
 		if (aggregated) {
 			fields.append("cohort_definition_id, covariate_id, sum_value");
 		} else {
+		    if (temporal) {
+		        fields.append("row_id, covariate_id, covariate_value, start_date as covariate_start_date, end_date as covariate_end_date");
+		    } else {
 			fields.append("row_id, covariate_id, covariate_value");
-		}
-		if (temporal) {
-			fields.append(", time_id");
+			}
 		}
 		boolean hasFeature = false;
 		StringBuilder sql = new StringBuilder();
 		if (aggregated) {
 			if (temporal)
 				sql.append(
-						"SELECT all_covariates.cohort_definition_id,\n  all_covariates.covariate_id,\n  all_covariates.time_id,\n  all_covariates.sum_value,\n  CAST(all_covariates.sum_value / (1.0 * total.total_count) AS FLOAT) AS average_value\nFROM (");
+						"SELECT all_covariates.cohort_definition_id,\n  all_covariates.covariate_id,\n  all_covariates.sum_value,\n  CAST(all_covariates.sum_value / (1.0 * total.total_count) AS FLOAT) AS average_value\nFROM (");
 			else
 				sql.append(
 						"SELECT all_covariates.cohort_definition_id,\n  all_covariates.covariate_id,\n  all_covariates.sum_value,\n  CAST(all_covariates.sum_value / (1.0 * total.total_count) AS FLOAT) AS average_value\nFROM (");

@@ -21,10 +21,11 @@ SELECT subject_id,
 INTO #dem_age_data
 } : {
 SELECT CAST(1000 + @analysis_id AS BIGINT) AS covariate_id,
-{@temporal} ? {
-    CAST(NULL AS INT) AS time_id,
-}	
 	row_id,
+    {@temporal} ? {
+    CAST(NULL as DATE) as start_date,
+    CAST(NULL as DATE) as end_date,
+    }
 	age AS covariate_value
 INTO @covariate_table	
 }
@@ -97,9 +98,6 @@ GROUP BY s.age,
 
 SELECT o.cohort_definition_id,
 	CAST(1000 + @analysis_id AS BIGINT) AS covariate_id,
-{@temporal} ? {
-    CAST(NULL AS INT) AS time_id,
-}
 	o.count_value,
 	o.min_value,
 	o.max_value,
