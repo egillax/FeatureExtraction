@@ -32,7 +32,8 @@ Imports:
   RSQLite,
   DBI,
   checkmate,
-  vroom
+  vroom,
+  lobstr
 Suggests:
   testthat,
   knitr,

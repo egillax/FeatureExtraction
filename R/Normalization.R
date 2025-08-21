@@ -13,6 +13,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+log_andromeda_event <- function(obj_or_filename, context, event_message) {
+  try(
+    { # Use try to ensure logging never crashes the process
+      ts <- format(Sys.time(), "%Y-%-%d %H:%M:%OS6")
+      pid <- Sys.getpid()
+      obj_id <- "UNKNOWN_FILE"
+      conn_addr <- "UNKNOWN_CONN"
+
+      # Check if we were passed a valid Andromeda object
+      if (Andromeda::isAndromeda(obj_or_filename) && try(Andromeda::isValidAndromeda(obj_or_filename), silent = TRUE))      {
+          obj_id <- basename(obj_or_filename@dbname)
+          # Get the memory address of the R object itself
+          conn_addr <- lobstr::obj_addr(obj_or_filename)
+      } else if (is.character(obj_or_filename)) {
+        # This case handles the finalizer where the object may no longer be valid
+        obj_id <- basename(obj_or_filename)
+        conn_addr <- "NA_FINALIZED"
+      }
+
+      message(sprintf("[AndromedaDiag] [%s] [PID:%s] [OBJ:%s] [CONN:%s] [%s] %s", ts, pid, obj_id, conn_addr, context, event_message))
+    },
+    silent = TRUE
+  )
+}
+
+
 
 #' Tidy covariate data
 #'
@@ -187,22 +213,37 @@ tidyCovariateData <- function(covariateData,
     if (normalize) {
       ParallelLogger::logInfo("Normalizing covariates")
       if (length(deleteCovariateIds) > 0) {
+      log_andromeda_event(covariateData, "NORMALIZE", "STARTING: Filtering maxValuePerCovariateId table.")
         covariateData$maxValuePerCovariateId <- covariateData$maxValuePerCovariateId %>%
           filter(!.data$covariateId %in% deleteCovariateIds)
+      log_andromeda_event(covariateData, "NORMALIZE", "FINISHED: Filtering maxValuePerCovariateId table.")
       }
+      log_andromeda_event(newCovariateData, "NORMALIZE", 
+                      paste("STARTING: inner_join with maxValuePerCovariateId from source CONN:", 
+                            lobstr::obj_addr(covariateData)))
       newCovariates <- newCovariates %>%
         inner_join(covariateData$maxValuePerCovariateId, by = "covariateId") %>%
         mutate(covariateValue = .data$covariateValue / .data$maxValue) %>%
         select(-.data$maxValue)
+      log_andromeda_event(newCovariateData, "NORMALIZE", "FINISHED: inner_join and mutate.")
+      log_andromeda_event(covariateData, "NORMALIZE", "STARTING: collect() on maxValuePerCovariateId.")
       metaData$normFactors <- covariateData$maxValuePerCovariateId %>%
         collect()
+      log_andromeda_event(covariateData, "NORMALIZE", "FINISHED: collect() on maxValuePerCovariateId.")
     } else if (length(deleteCovariateIds) > 0) {
+      log_andromeda_event(newCovariateData, "FILTER_ONLY", "STARTING: Filtering newCovariates table.")
+  
       newCovariates <- newCovariates %>%
           filter(!.data$covariateId %in% deleteCovariateIds)
+      log_andromeda_event(newCovariateData, "FILTER_ONLY", "FINISHED: Filtering newCovariates table.")
     } 
+    log_andromeda_event(newCovariateData, "ASSIGN_FINAL", "STARTING: Final assignment to newCovariateData$covariates.")
     newCovariateData$covariates <- newCovariates
+    log_andromeda_event(newCovariateData, "ASSIGN_FINAL", "FINISHED: Final assignment to newCovariateData$covariates.")
     if (!is.null(covariateData$timeRef)) {
+      log_andromeda_event(newCovariateData, "ASSIGN_FINAL", "STARTING: Final assignment to newCovariateData$timeRef.")
       newCovariateData$timeRef <- covariateData$timeRef
+      log_andromeda_event(newCovariateData, "ASSIGN_FINAL", "FINISHED: Final assignment to newCovariateData$timeRef.")
     }
   }
 
