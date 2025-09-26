@@ -89,8 +89,15 @@ SELECT
 	) raw_data
 {@temporal} ? {
 INNER JOIN #time_period time_period
-	ON raw_data.start_day_offset <= time_period.end_day
+	ON {@temporal_consecutive} ? {
+	raw_data.end_day_offset >= @temporal_min_start
+	AND raw_data.start_day_offset <= @temporal_max_end
+	AND time_period.time_id BETWEEN CAST(FLOOR(((CASE WHEN raw_data.start_day_offset < @temporal_min_start THEN @temporal_min_start ELSE raw_data.start_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+		AND CAST(FLOOR(((CASE WHEN raw_data.end_day_offset > @temporal_max_end THEN @temporal_max_end ELSE raw_data.end_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+	} : {
+	raw_data.start_day_offset <= time_period.end_day
 	AND raw_data.end_day_offset >= time_period.start_day
+	}
 }
 ;
 

@@ -64,8 +64,15 @@ INTO @covariate_table
 FROM filtered
 {@temporal} ? {
 INNER JOIN #time_period time_period
-	ON filtered.start_day_offset <= time_period.end_day
+	ON {@temporal_consecutive} ? {
+	filtered.end_day_offset >= @temporal_min_start
+	AND filtered.start_day_offset <= @temporal_max_end
+	AND time_period.time_id BETWEEN CAST(FLOOR(((CASE WHEN filtered.start_day_offset < @temporal_min_start THEN @temporal_min_start ELSE filtered.start_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+		AND CAST(FLOOR(((CASE WHEN filtered.end_day_offset > @temporal_max_end THEN @temporal_max_end ELSE filtered.end_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+	} : {
+	filtered.start_day_offset <= time_period.end_day
 	AND filtered.end_day_offset >= time_period.start_day
+	}
 }
 GROUP BY filtered.covariate_cohort_definition_id,
 {@temporal} ? {

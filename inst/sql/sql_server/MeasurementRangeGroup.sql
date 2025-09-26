@@ -62,8 +62,15 @@ FROM (
 ) grouped_2
 {@temporal} ? {
 INNER JOIN #time_period time_period
-	ON grouped_2.start_day_offset <= time_period.end_day
+	ON {@temporal_consecutive} ? {
+	grouped_2.end_day_offset >= @temporal_min_start
+	AND grouped_2.start_day_offset <= @temporal_max_end
+	AND time_period.time_id BETWEEN CAST(FLOOR(((CASE WHEN grouped_2.start_day_offset < @temporal_min_start THEN @temporal_min_start ELSE grouped_2.start_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+		AND CAST(FLOOR(((CASE WHEN grouped_2.end_day_offset > @temporal_max_end THEN @temporal_max_end ELSE grouped_2.end_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+	} : {
+	grouped_2.start_day_offset <= time_period.end_day
 	AND grouped_2.end_day_offset >= time_period.start_day
+	}
 }
 {@included_cov_table != ''} ? {WHERE (CAST(measurement_concept_id AS BIGINT) * 10000) + (range_group * 1000) + @analysis_id IN (SELECT id FROM @included_cov_table)}
 GROUP BY measurement_concept_id,

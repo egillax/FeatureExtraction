@@ -1032,4 +1032,11 @@ public class FeatureExtraction {
 			return ids.hashCode() + (addDescendants ? 1 : 0);
 		}
 	}
+	private static class TemporalWindowMetadata {
+		public boolean isConsecutive = false;
+		public int windowWidth = 0;
+		public int minStart = 0;
+		public int maxEnd = 0;
+	}
+
 }

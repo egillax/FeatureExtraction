@@ -126,8 +126,15 @@ AND
 ) temp
 {@temporal} ? {
 INNER JOIN #time_period time_period
-	ON temp.start_day_offset <= time_period.end_day
+	ON {@temporal_consecutive} ? {
+	temp.end_day_offset >= @temporal_min_start
+	AND temp.start_day_offset <= @temporal_max_end
+	AND time_period.time_id BETWEEN CAST(FLOOR(((CASE WHEN temp.start_day_offset < @temporal_min_start THEN @temporal_min_start ELSE temp.start_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+		AND CAST(FLOOR(((CASE WHEN temp.end_day_offset > @temporal_max_end THEN @temporal_max_end ELSE temp.end_day_offset END) - @temporal_min_start) * 1.0 / (@temporal_window_width + 1)) + 1 AS INT)
+	} : {
+	temp.start_day_offset <= time_period.end_day
 	AND temp.end_day_offset >= time_period.start_day
+	}
 }
 {@aggregated} ? {		
 GROUP BY cohort_definition_id,
