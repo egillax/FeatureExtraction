@@ -72,7 +72,7 @@ WHERE
 SELECT 
 	CAST(ancestor_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
 {@temporal | @temporal_sequence} ? {
-    time_id,
+	{@temporal} ? {time_period.time_id,} : {time_id,}
 }	
 {@aggregated} ? {
 	cohort_definition_id,
@@ -85,7 +85,8 @@ INTO @covariate_table
 FROM (
 	SELECT DISTINCT ancestor_concept_id,
 {@temporal} ? {
-		time_id,
+		DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) AS start_day_offset,
+		DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) AS end_day_offset,
 }	
 {@temporal_sequence} ? {
 FLOOR(DATEDIFF(@time_part, @cdm_database_schema.@domain_table.@domain_start_date, cohort.cohort_start_date)*1.0/@time_interval) as time_id,
@@ -111,27 +112,28 @@ FLOOR(DATEDIFF(@time_part, @cdm_database_schema.@domain_table.@domain_start_date
     ON ca.ancestor_concept_id IN (9201, 38004311, 8920, 262)
     AND ca.descendant_concept_id = vo.visit_concept_id
 }		
-{@temporal} ? {
-	INNER JOIN #time_period time_period
-		ON @domain_start_date <= DATEADD(DAY, time_period.end_day, cohort.cohort_start_date)
-		AND @domain_end_date >= DATEADD(DAY, time_period.start_day, cohort.cohort_start_date)
 	WHERE @domain_concept_id != 0
+{@temporal} ? {
 } : {
-	WHERE @domain_start_date <= DATEADD(DAY,{@temporal_sequence} ? {@sequence_end_day} :{ @end_day}, cohort.cohort_start_date)
+	AND @domain_start_date <= DATEADD(DAY,{@temporal_sequence} ? {@sequence_end_day} :{ @end_day}, cohort.cohort_start_date)
 {@start_day != 'anyTimePrior'} ? {				
 AND 
 {@temporal_sequence} ? {@domain_start_date } : {@domain_end_date }
 >= DATEADD(DAY, {@temporal_sequence} ? {@sequence_start_day} : {@start_day}, cohort.cohort_start_date)}
-		AND @domain_concept_id != 0
 }
 {@included_cov_table != ''} ? {		AND CAST(ancestor_concept_id AS BIGINT) * 1000 + @analysis_id IN (SELECT id FROM @included_cov_table)}
 {@cohort_definition_id != -1} ? {		AND cohort.cohort_definition_id IN (@cohort_definition_id)}
 ) temp
+{@temporal} ? {
+INNER JOIN #time_period time_period
+	ON temp.start_day_offset <= time_period.end_day
+	AND temp.end_day_offset >= time_period.start_day
+}
 {@aggregated} ? {		
 GROUP BY cohort_definition_id,
 	ancestor_concept_id
 {@temporal | @temporal_sequence} ? {
-    ,time_id
+	{@temporal} ? {,time_period.time_id} : {,time_id}
 }	
 }
 ;

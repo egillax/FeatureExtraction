@@ -16,7 +16,7 @@ SELECT cohort_definition_id,
 	subject_id,
 	cohort_start_date,
 {@temporal} ? {
-    time_id,
+    time_period.time_id,
 }	
 {@sub_type == 'stratified'} ? {
 	covariate_id,
@@ -30,16 +30,17 @@ SELECT covariate_id,
 SELECT CAST(1000 + @analysis_id AS BIGINT) AS covariate_id,
 }
 {@temporal} ? {
-	time_id,
+	time_period.time_id,
 }	
 	row_id,
 	concept_count AS covariate_value
 INTO @covariate_table	
 }
 FROM (
-	SELECT 
+SELECT 
 {@temporal} ? {
-		time_id,
+		DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) AS start_day_offset,
+		DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) AS end_day_offset,
 }	
 {@sub_type == 'stratified'} ? {
 		CAST(@domain_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
@@ -60,9 +61,6 @@ FROM (
 	INNER JOIN @cdm_database_schema.@domain_table
 		ON cohort.subject_id = @domain_table.person_id
 {@temporal} ? {
-	INNER JOIN #time_period time_period
-		ON @domain_start_date <= DATEADD(DAY, time_period.end_day, cohort.cohort_start_date)
-		AND @domain_end_date >= DATEADD(DAY, time_period.start_day, cohort.cohort_start_date)
 	WHERE @domain_concept_id != 0
 } : {
 	WHERE @domain_start_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
@@ -74,7 +72,8 @@ FROM (
 {@cohort_definition_id != -1} ? {		AND cohort.cohort_definition_id IN (@cohort_definition_id)}
 	GROUP BY 
 {@temporal} ? {
-		time_id,
+		start_day_offset,
+		end_day_offset,
 }	
 {@sub_type == 'stratified'} ? {
 		@domain_concept_id,
@@ -87,7 +86,13 @@ FROM (
 
 		cohort.@row_id_field		
 }	
-	) raw_data;
+	) raw_data
+{@temporal} ? {
+INNER JOIN #time_period time_period
+	ON raw_data.start_day_offset <= time_period.end_day
+	AND raw_data.end_day_offset >= time_period.start_day
+}
+;
 
 {@aggregated} ? {
 WITH t1 AS (

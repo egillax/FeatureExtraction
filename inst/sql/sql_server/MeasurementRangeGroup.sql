@@ -2,7 +2,7 @@
 SELECT 
 	(CAST(measurement_concept_id AS BIGINT) * 10000) + (range_group * 1000) + @analysis_id AS covariate_id,
 {@temporal} ? {
-    time_id,
+    time_period.time_id,
 }	
 {@aggregated} ? {
 	cohort_definition_id,
@@ -17,7 +17,8 @@ FROM (
 	SELECT DISTINCT measurement_concept_id,
 		range_group,		
 {@temporal} ? {
-		time_id,
+		start_day_offset,
+		end_day_offset,
 }	
 		cohort_definition_id,
 		subject_id,
@@ -31,7 +32,8 @@ FROM (
 			ELSE 2
 		END AS range_group,		
 {@temporal} ? {
-		time_id,
+		DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) AS start_day_offset,
+		DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) AS end_day_offset,
 }	
 {@aggregated} ? {
 		cohort_definition_id,
@@ -43,15 +45,11 @@ FROM (
 	FROM @cohort_table cohort
 	INNER JOIN @cdm_database_schema.measurement
 		ON cohort.subject_id = measurement.person_id
-{@temporal} ? {
-	INNER JOIN #time_period time_period
-		ON measurement_date <= DATEADD(DAY, time_period.end_day, cohort.cohort_start_date)
-		AND measurement_date >= DATEADD(DAY, time_period.start_day, cohort.cohort_start_date)
 	WHERE measurement_concept_id != 0
+{@temporal} ? {
 } : {
-	WHERE measurement_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
+	AND measurement_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
 {@start_day != 'anyTimePrior'} ? {				AND measurement_date >= DATEADD(DAY, @start_day, cohort.cohort_start_date)}
-		AND measurement_concept_id != 0
 }
 		AND range_low IS NOT NULL
 		AND range_high IS NOT NULL
@@ -62,6 +60,11 @@ FROM (
 	)  grouped_1
 }
 ) grouped_2
+{@temporal} ? {
+INNER JOIN #time_period time_period
+	ON grouped_2.start_day_offset <= time_period.end_day
+	AND grouped_2.end_day_offset >= time_period.start_day
+}
 {@included_cov_table != ''} ? {WHERE (CAST(measurement_concept_id AS BIGINT) * 10000) + (range_group * 1000) + @analysis_id IN (SELECT id FROM @included_cov_table)}
 GROUP BY measurement_concept_id,
 	range_group
@@ -71,7 +74,7 @@ GROUP BY measurement_concept_id,
 	,row_id
 } 
 {@temporal} ? {
-    ,time_id
+    ,time_period.time_id
 } 
 ;
 
@@ -130,4 +133,3 @@ SELECT @analysis_id AS analysis_id,
 }
 	CAST('Y' AS VARCHAR(1)) AS is_binary,
 	CAST(NULL AS VARCHAR(1)) AS missing_means_zero;
-

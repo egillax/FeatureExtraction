@@ -6,48 +6,77 @@ DROP TABLE IF EXISTS #occ_count_prep;
 DROP TABLE IF EXISTS #occ_count_prep2;
 }
 
-SELECT CAST(covariate_cohort.cohort_definition_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
+WITH filtered AS (
+	SELECT
+		covariate_cohort.cohort_definition_id AS covariate_cohort_definition_id,
+		main_cohort.cohort_definition_id AS main_cohort_definition_id,
+		main_cohort.subject_id,
+		main_cohort.cohort_start_date,
+		main_cohort.@row_id_field AS row_id,
+		covariate_cohort.cohort_start_date AS covariate_start_date,
+		CASE
+			WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
+			ELSE covariate_cohort.cohort_end_date
+		END AS covariate_end_date,
+		DATEDIFF(DAY, main_cohort.cohort_start_date, covariate_cohort.cohort_start_date) AS start_day_offset,
+		DATEDIFF(
+			DAY,
+			main_cohort.cohort_start_date,
+			CASE
+				WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
+				ELSE covariate_cohort.cohort_end_date
+			END
+		) AS end_day_offset
+	FROM @cohort_table main_cohort
+	INNER JOIN @covariate_cohort_table covariate_cohort
+		ON main_cohort.subject_id = covariate_cohort.subject_id
+	INNER JOIN #covariate_cohort_ref covariate_cohort_ref
+		ON covariate_cohort.cohort_definition_id = CAST(covariate_cohort_ref.cohort_id AS INT)
+	WHERE 1 = 1
 {@temporal} ? {
-    time_id,
-}	
+} : {
+	AND covariate_cohort.cohort_start_date <= DATEADD(DAY, @end_day, main_cohort.cohort_start_date)
+{@start_day != 'anyTimePrior'} ? {		
+	AND CASE
+		WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
+		ELSE covariate_cohort.cohort_end_date
+	END >= DATEADD(DAY, @start_day, main_cohort.cohort_start_date)}
+}
+{@included_cov_table != ''} ? {	AND CAST(covariate_cohort.cohort_definition_id AS BIGINT) * 1000 + @analysis_id IN (SELECT id FROM @included_cov_table)}
+{@cohort_definition_id != -1} ? {	AND main_cohort.cohort_definition_id IN (@cohort_definition_id)}
+)
+
+SELECT CAST(filtered.covariate_cohort_definition_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
+{@temporal} ? {
+	time_period.time_id,
+}
 {@aggregated} ? {
-	COUNT(DISTINCT covariate_cohort.cohort_start_date) AS occurrence_count,
-	main_cohort.cohort_definition_id,
-	main_cohort.subject_id,
-	main_cohort.cohort_start_date
+	COUNT(DISTINCT filtered.covariate_start_date) AS occurrence_count,
+	filtered.main_cohort_definition_id AS cohort_definition_id,
+	filtered.subject_id,
+	filtered.cohort_start_date
 INTO #occ_count_data
 } : {
-	COUNT(DISTINCT covariate_cohort.cohort_start_date) AS covariate_value,
-	main_cohort.@row_id_field AS row_id
+	COUNT(DISTINCT filtered.covariate_start_date) AS covariate_value,
+	filtered.row_id AS row_id
 INTO @covariate_table
-}	
-FROM @cohort_table main_cohort
-INNER JOIN @covariate_cohort_table covariate_cohort
-	ON main_cohort.subject_id = covariate_cohort.subject_id 
-INNER JOIN #covariate_cohort_ref covariate_cohort_ref
-	ON covariate_cohort.cohort_definition_id = CAST(covariate_cohort_ref.cohort_id AS INT)
+}
+FROM filtered
 {@temporal} ? {
 INNER JOIN #time_period time_period
-	ON covariate_cohort.cohort_start_date <= DATEADD(DAY, time_period.end_day, main_cohort.cohort_start_date)
-	AND CASE WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date ELSE covariate_cohort.cohort_end_date END >= DATEADD(DAY, time_period.start_day, main_cohort.cohort_start_date)
-} : {
-WHERE covariate_cohort.cohort_start_date <= DATEADD(DAY, @end_day, main_cohort.cohort_start_date)
-{@start_day != 'anyTimePrior'} ? {		
-		AND CASE WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date ELSE covariate_cohort.cohort_end_date END >= DATEADD(DAY, @start_day, main_cohort.cohort_start_date)
+	ON filtered.start_day_offset <= time_period.end_day
+	AND filtered.end_day_offset >= time_period.start_day
 }
-}	
-{@included_cov_table != ''} ? {		AND CAST(covariate_cohort.cohort_definition_id AS BIGINT) * 1000 + @analysis_id IN (SELECT id FROM @included_cov_table)}
-{@cohort_definition_id != -1} ? {		AND main_cohort.cohort_definition_id IN (@cohort_definition_id)}
-GROUP BY covariate_cohort.cohort_definition_id,
+GROUP BY filtered.covariate_cohort_definition_id,
 {@temporal} ? {
-		time_id,
-}	
+	time_period.time_id,
+}
 {@aggregated} ? {
-		main_cohort.cohort_definition_id,
-		main_cohort.subject_id,
-		main_cohort.cohort_start_date
+	filtered.main_cohort_definition_id,
+	filtered.subject_id,
+	filtered.cohort_start_date
 } : {
-		main_cohort.@row_id_field
+	filtered.row_id
 }
 ;
 
