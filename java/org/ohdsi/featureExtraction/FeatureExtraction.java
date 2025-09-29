@@ -610,6 +610,7 @@ public class FeatureExtraction {
 			temporalSequence = jsonObject.getBoolean(TEMPORAL_SEQUENCE);
 		} catch(Exception e) {}
 		boolean temporal = jsonObject.getBoolean(TEMPORAL);
+		TemporalWindowMetadata temporalWindowMetadata = determineTemporalWindowMetadata(jsonObject, temporal);
 		boolean temporalAnnual = false;
 		try {
 			temporalAnnual = jsonObject.has(TEMPORAL_ANNUAL) && jsonObject.getBoolean(TEMPORAL_ANNUAL);
@@ -664,7 +665,7 @@ public class FeatureExtraction {
 		jsonWriter.endObject();
 
 		jsonWriter.key("sqlConstruction");
-		jsonWriter.value(createConstructionSql(jsonObject, idSetToName, temporal, temporalSequence, aggregated, cohortTable, rowIdField, cohortDefinitionIds, cdmDatabaseSchema));
+		jsonWriter.value(createConstructionSql(jsonObject, idSetToName, temporal, temporalSequence, aggregated, cohortTable, rowIdField, cohortDefinitionIds, cdmDatabaseSchema, temporalWindowMetadata));
 
 		String sqlQueryFeatures = createQuerySql(jsonObject, cohortTable, cohortDefinitionIds, aggregated, temporal, temporalSequence, minCharacterizationMean);
 		if (sqlQueryFeatures != null) {
@@ -717,6 +718,58 @@ public class FeatureExtraction {
 		for (int i = 0; i < length; i++)
 			index[i] = i + 1;
 		return index;
+	}
+
+	private static TemporalWindowMetadata determineTemporalWindowMetadata(JSONObject jsonObject, boolean temporal) {
+		TemporalWindowMetadata metadata = new TemporalWindowMetadata();
+		if (!temporal)
+			return metadata;
+		Object startDaysObject = jsonObject.opt("temporalStartDays");
+		Object endDaysObject = jsonObject.opt("temporalEndDays");
+		if (startDaysObject == null || endDaysObject == null)
+			return metadata;
+		JSONArray startDaysArray = startDaysObject instanceof JSONArray ? (JSONArray) startDaysObject : null;
+		JSONArray endDaysArray = endDaysObject instanceof JSONArray ? (JSONArray) endDaysObject : null;
+		if (startDaysArray == null || endDaysArray == null) {
+			if (startDaysObject instanceof Number && endDaysObject instanceof Number) {
+				startDaysArray = new JSONArray();
+				startDaysArray.put(((Number) startDaysObject).intValue());
+				endDaysArray = new JSONArray();
+				endDaysArray.put(((Number) endDaysObject).intValue());
+			} else {
+				return metadata;
+			}
+		}
+		if (startDaysArray.length() == 0 || startDaysArray.length() != endDaysArray.length())
+			return metadata;
+		int windowWidth = endDaysArray.getInt(0) - startDaysArray.getInt(0);
+		if (windowWidth < 0)
+			return metadata;
+		int step = windowWidth + 1;
+		int previousStart = startDaysArray.getInt(0);
+		int previousEnd = endDaysArray.getInt(0);
+		boolean valid = true;
+		for (int i = 1; i < startDaysArray.length() && valid; i++) {
+			int currentStart = startDaysArray.getInt(i);
+			int currentEnd = endDaysArray.getInt(i);
+			if ((currentEnd - currentStart) != windowWidth) {
+				valid = false;
+				break;
+			}
+			if (currentStart != previousStart + step || currentEnd != previousEnd + step) {
+				valid = false;
+				break;
+			}
+			previousStart = currentStart;
+			previousEnd = currentEnd;
+		}
+		if (valid) {
+			metadata.isConsecutive = true;
+			metadata.windowWidth = windowWidth;
+			metadata.minStart = startDaysArray.getInt(0);
+			metadata.maxEnd = endDaysArray.getInt(endDaysArray.length() - 1);
+		}
+		return metadata;
 	}
 
 	private static Object createCleanupSql(JSONObject jsonObject, boolean temporal2) {
@@ -823,7 +876,7 @@ public class FeatureExtraction {
 	}
 
 	private static String createConstructionSql(JSONObject jsonObject, Map<IdSet, String> idSetToName, boolean temporal, boolean temporalSequence, boolean aggregated, String cohortTable,
-												String rowIdField, long[] cohortDefinitionIds, String cdmDatabaseSchema) {
+											String rowIdField, long[] cohortDefinitionIds, String cdmDatabaseSchema, TemporalWindowMetadata temporalWindowMetadata) {
 		StringBuilder sql = new StringBuilder();
 
 		// Add descendants to ID sets if needed:
@@ -851,52 +904,50 @@ public class FeatureExtraction {
 				analysis.put("covariateTable", covariateTable);
 				String templateSql = nameToSql.get(analysis.get(SQL_FILE_NAME));
 				JSONObject parameters = analysis.getJSONObject(PARAMETERS);
-				String[] keys = new String[parameters.length() + 12];
-				String[] values = new String[parameters.length() + 12];
-				int i = 0;
+				List<String> keys = new ArrayList<String>(parameters.length() + 16);
+				List<String> values = new ArrayList<String>(parameters.length() + 16);
 				for (String key : parameters.keySet()) {
-					keys[i] = StringUtilities.camelCaseToSnakeCase(key);
-					values[i] = parameters.get(key).toString();
-					i++;
+					keys.add(StringUtilities.camelCaseToSnakeCase(key));
+					values.add(parameters.get(key).toString());
 				}
 
-				keys[i] = "cohort_table";
-				values[i] = cohortTable;
-				i++;
-				keys[i] = "row_id_field";
-				values[i] = rowIdField;
-				i++;
-				keys[i] = "cohort_definition_id";
-				values[i] = longsToString(cohortDefinitionIds);
-				i++;
-				keys[i] = "cdm_database_schema";
-				values[i] = cdmDatabaseSchema;
-				i++;
-				keys[i] = "covariate_table";
-				values[i] = covariateTable;
-				i++;
-				keys[i] = "temporal";
-				values[i] = Boolean.toString(temporal);
-				i++;
-				keys[i] = "temporal_sequence";
-				values[i] = Boolean.toString(temporalSequence);
-				i++;
-				keys[i] = "aggregated";
-				values[i] = Boolean.toString(aggregated);
-				i++;
-				keys[i] = "included_concept_table";
-				values[i] = analysis.getString("incConcepts");
-				i++;
-				keys[i] = "excluded_concept_table";
-				values[i] = analysis.getString("excConcepts");
-				i++;
-				keys[i] = "included_cov_table";
-				values[i] = analysis.getString("incCovs");
-				i++;
-				keys[i] = "temporal_annual";
-				values[i] = Boolean.toString(temporalAnnual);
+				keys.add("cohort_table");
+				values.add(cohortTable);
+				keys.add("row_id_field");
+				values.add(rowIdField);
+				keys.add("cohort_definition_id");
+				values.add(longsToString(cohortDefinitionIds));
+				keys.add("cdm_database_schema");
+				values.add(cdmDatabaseSchema);
+				keys.add("covariate_table");
+				values.add(covariateTable);
+				keys.add("temporal");
+				values.add(Boolean.toString(temporal));
+				keys.add("temporal_sequence");
+				values.add(Boolean.toString(temporalSequence));
+				keys.add("aggregated");
+				values.add(Boolean.toString(aggregated));
+				keys.add("included_concept_table");
+				values.add(analysis.getString("incConcepts"));
+				keys.add("excluded_concept_table");
+				values.add(analysis.getString("excConcepts"));
+				keys.add("included_cov_table");
+				values.add(analysis.getString("incCovs"));
+				keys.add("temporal_annual");
+				values.add(Boolean.toString(temporalAnnual));
+				keys.add("temporal_consecutive");
+				values.add(Boolean.toString(temporalWindowMetadata.isConsecutive));
+				keys.add("temporal_window_width");
+				values.add(Integer.toString(temporalWindowMetadata.windowWidth));
+				keys.add("temporal_min_start");
+				values.add(Integer.toString(temporalWindowMetadata.minStart));
+				keys.add("temporal_max_end");
+				values.add(Integer.toString(temporalWindowMetadata.maxEnd));
 
-				sql.append(SqlRender.renderSql(templateSql, keys, values));
+				String[] orderedKeys = keys.toArray(new String[0]);
+				String[] orderedValues = values.toArray(new String[0]);
+				reorderParametersByLength(orderedKeys, orderedValues);
+				sql.append(SqlRender.renderSql(templateSql, orderedKeys, orderedValues));
 
 				if (templateSql.contains("CAST('N' AS VARCHAR(1)) AS is_binary"))
 					analysis.put("isBinary", false);
@@ -982,6 +1033,19 @@ public class FeatureExtraction {
 			columns.set(i, column);
 		}
 		return columns;
+	}
+
+	private static void reorderParametersByLength(String[] keys, String[] values) {
+		Integer[] order = new Integer[keys.length];
+		for (int idx = 0; idx < keys.length; idx++)
+			order[idx] = idx;
+		String[] keysCopy = keys.clone();
+		String[] valuesCopy = values.clone();
+		Arrays.sort(order, (left, right) -> Integer.compare(keysCopy[right].length(), keysCopy[left].length()));
+		for (int idx = 0; idx < order.length; idx++) {
+			keys[idx] = keysCopy[order[idx]];
+			values[idx] = valuesCopy[order[idx]];
+		}
 	}
 
 	public static class PrespecAnalysis {
