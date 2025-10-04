@@ -12,6 +12,134 @@ IF OBJECT_ID('tempdb..#concept_count_prep', 'U') IS NOT NULL
 IF OBJECT_ID('tempdb..#concept_count_prep2', 'U') IS NOT NULL
 	DROP TABLE #concept_count_prep2;
 
+{@temporal} ? {
+WITH time_bounds AS (
+  SELECT min_start_day, max_end_day
+  FROM #time_window_bounds
+),
+base_events AS (
+  SELECT
+    cohort.cohort_definition_id,
+    cohort.subject_id,
+    cohort.cohort_start_date,
+    cohort.@row_id_field AS row_id,
+    @domain_concept_id AS domain_concept_id,
+    @domain_table.@domain_start_date AS event_start_date,
+    @domain_table.@domain_end_date AS event_end_date,
+    ROW_NUMBER() OVER (
+      PARTITION BY cohort.subject_id,
+        @domain_table.@domain_start_date,
+        @domain_table.@domain_end_date,
+        @domain_concept_id
+      ORDER BY @domain_table.@domain_start_date,
+        @domain_table.@domain_end_date,
+        @domain_concept_id
+    ) AS event_ordinal
+  FROM @cohort_table cohort
+  INNER JOIN @cdm_database_schema.@domain_table
+    ON cohort.subject_id = @domain_table.person_id
+  WHERE @domain_concept_id != 0
+{@excluded_concept_table != ''} ? {
+    AND @domain_concept_id NOT IN (SELECT id FROM @excluded_concept_table)
+}
+{@included_concept_table != ''} ? {
+    AND @domain_concept_id IN (SELECT id FROM @included_concept_table)
+}
+{@cohort_definition_id != -1} ? {
+    AND cohort.cohort_definition_id IN (@cohort_definition_id)
+}
+),
+raw_events AS (
+  SELECT
+    base_events.*,
+    DATEDIFF(DAY, base_events.cohort_start_date, base_events.event_start_date) AS start_offset,
+    DATEDIFF(DAY, base_events.cohort_start_date, base_events.event_end_date) AS end_offset
+  FROM base_events
+),
+clamped_events AS (
+  SELECT re.*,
+    CASE WHEN re.start_offset < tb.min_start_day THEN tb.min_start_day ELSE re.start_offset END AS clamped_start_offset,
+    CASE WHEN re.end_offset > tb.max_end_day THEN tb.max_end_day ELSE re.end_offset END AS clamped_end_offset
+  FROM raw_events re
+  CROSS JOIN time_bounds tb
+  WHERE re.end_offset >= tb.min_start_day
+    AND re.start_offset <= tb.max_end_day
+),
+window_events AS (
+  SELECT
+    ce.domain_concept_id,
+    ce.cohort_definition_id,
+    ce.subject_id,
+    ce.cohort_start_date,
+    ce.row_id,
+    ce.event_ordinal,
+    wm.time_id
+  FROM clamped_events ce
+  INNER JOIN #atomic_intervals ai
+    ON ce.clamped_start_offset <= ai.end_day
+    AND ce.clamped_end_offset >= ai.start_day
+  INNER JOIN #window_interval_map wm
+    ON ai.interval_id = wm.interval_id
+),
+event_windows AS (
+  SELECT DISTINCT
+    domain_concept_id,
+    cohort_definition_id,
+    subject_id,
+    cohort_start_date,
+    row_id,
+    event_ordinal,
+    time_id
+  FROM window_events
+)
+{@aggregated} ? {
+SELECT
+  event_windows.cohort_definition_id,
+  event_windows.subject_id,
+  event_windows.cohort_start_date,
+  event_windows.time_id,
+{@sub_type == 'stratified'} ? {
+  CAST(event_windows.domain_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
+}
+{@sub_type == 'distinct'} ? {
+  COUNT(DISTINCT event_windows.domain_concept_id) AS concept_count
+} : {
+  COUNT(*) AS concept_count
+}
+INTO #concept_count_data
+FROM event_windows
+GROUP BY event_windows.cohort_definition_id,
+  event_windows.subject_id,
+  event_windows.cohort_start_date,
+  event_windows.time_id
+{@sub_type == 'stratified'} ? {
+  ,event_windows.domain_concept_id
+}
+;
+} : {
+SELECT
+{@sub_type == 'stratified'} ? {
+  CAST(event_windows.domain_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
+} : {
+  CAST(1000 + @analysis_id AS BIGINT) AS covariate_id,
+}
+  event_windows.time_id,
+  event_windows.row_id,
+{@sub_type == 'distinct'} ? {
+  COUNT(DISTINCT event_windows.domain_concept_id) AS covariate_value
+} : {
+  COUNT(*) AS covariate_value
+}
+INTO @covariate_table
+FROM event_windows
+GROUP BY event_windows.row_id,
+  event_windows.time_id
+{@sub_type == 'stratified'} ? {
+  ,event_windows.domain_concept_id
+}
+;
+}
+} : {
 SELECT cohort_definition_id,
 	subject_id,
 	cohort_start_date,
@@ -88,6 +216,8 @@ FROM (
 		cohort.@row_id_field		
 }	
 	) raw_data;
+}
+
 
 {@aggregated} ? {
 WITH t1 AS (

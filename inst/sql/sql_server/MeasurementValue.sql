@@ -16,6 +16,98 @@ WHERE value_as_number IS NOT NULL
 IF OBJECT_ID('tempdb..#meas_val_data', 'U') IS NOT NULL
 	DROP TABLE #meas_val_data;
 	
+{@temporal} ? {
+WITH time_bounds AS (
+  SELECT min_start_day, max_end_day
+  FROM #time_window_bounds
+),
+measurement_events AS (
+  SELECT
+    cohort.cohort_definition_id,
+    cohort.subject_id,
+    cohort.cohort_start_date,
+    cohort.@row_id_field AS row_id,
+    meas_cov.covariate_id,
+    measurement.measurement_concept_id,
+    measurement.unit_concept_id,
+    measurement.measurement_date,
+    measurement.value_as_number,
+    DATEDIFF(DAY, cohort.cohort_start_date, measurement.measurement_date) AS day_offset
+  FROM @cohort_table cohort
+  INNER JOIN @cdm_database_schema.measurement
+    ON cohort.subject_id = measurement.person_id
+  INNER JOIN #meas_cov meas_cov
+    ON meas_cov.measurement_concept_id = measurement.measurement_concept_id
+    AND meas_cov.unit_concept_id = measurement.unit_concept_id
+  WHERE measurement.measurement_concept_id != 0
+    AND measurement.value_as_number IS NOT NULL
+{@cohort_definition_id != -1} ? {
+    AND cohort.cohort_definition_id IN (@cohort_definition_id)
+}
+),
+clamped_events AS (
+  SELECT me.*,
+    CASE WHEN me.day_offset < tb.min_start_day THEN tb.min_start_day ELSE me.day_offset END AS clamped_start_offset,
+    CASE WHEN me.day_offset > tb.max_end_day THEN tb.max_end_day ELSE me.day_offset END AS clamped_end_offset
+  FROM measurement_events me
+  CROSS JOIN time_bounds tb
+  WHERE me.day_offset >= tb.min_start_day
+    AND me.day_offset <= tb.max_end_day
+),
+window_events AS (
+  SELECT
+    ce.cohort_definition_id,
+    ce.subject_id,
+    ce.cohort_start_date,
+    ce.row_id,
+    ce.covariate_id,
+    ce.measurement_concept_id,
+    ce.unit_concept_id,
+    ce.measurement_date,
+    ce.value_as_number,
+    wm.time_id
+  FROM clamped_events ce
+  INNER JOIN #atomic_intervals ai
+    ON ce.clamped_start_offset <= ai.end_day
+    AND ce.clamped_end_offset >= ai.start_day
+  INNER JOIN #window_interval_map wm
+    ON ai.interval_id = wm.interval_id
+),
+ranked_events AS (
+  SELECT
+    window_events.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+{@aggregated} ? {
+        window_events.cohort_definition_id,
+        window_events.subject_id,
+        window_events.cohort_start_date,
+} : {
+        window_events.row_id,
+}
+        window_events.measurement_concept_id,
+        window_events.time_id
+      ORDER BY window_events.measurement_date DESC,
+        window_events.unit_concept_id,
+        window_events.value_as_number
+    ) AS rn
+  FROM window_events
+)
+SELECT 
+{@aggregated} ? {
+    ranked_events.cohort_definition_id,
+    ranked_events.subject_id,
+    ranked_events.cohort_start_date,
+} : {
+    ranked_events.row_id,
+}
+  ranked_events.time_id,
+  ranked_events.covariate_id,
+  ranked_events.value_as_number
+INTO #meas_val_data
+FROM ranked_events
+WHERE ranked_events.rn = 1;
+} : {
 SELECT 
 {@aggregated} ? {
 		cohort_definition_id,
@@ -81,7 +173,9 @@ ROW_NUMBER() OVER (PARTITION BY cohort.@row_id_field, measurement.measurement_co
 		AND value_as_number IS NOT NULL 			
 {@cohort_definition_id != -1} ? {		AND cohort.cohort_definition_id IN (@cohort_definition_id)}
 ) temp
-WHERE rn = 1;	
+WHERE rn = 1;
+}
+	
 
 {@aggregated} ? {
 IF OBJECT_ID('tempdb..#meas_val_stats', 'U') IS NOT NULL

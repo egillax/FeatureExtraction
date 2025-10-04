@@ -1,4 +1,109 @@
 -- Feature construction
+{@temporal} ? {
+WITH time_bounds AS (
+  SELECT min_start_day, max_end_day
+  FROM #time_window_bounds
+),
+measurement_events AS (
+  SELECT
+    cohort.cohort_definition_id,
+    cohort.subject_id,
+    cohort.cohort_start_date,
+    cohort.@row_id_field AS row_id,
+    measurement.measurement_concept_id,
+    CASE
+      WHEN measurement.value_as_number < measurement.range_low THEN 1
+      WHEN measurement.value_as_number > measurement.range_high THEN 3
+      ELSE 2
+    END AS range_group,
+    DATEDIFF(DAY, cohort.cohort_start_date, measurement.measurement_date) AS day_offset
+  FROM @cohort_table cohort
+  INNER JOIN @cdm_database_schema.measurement
+    ON cohort.subject_id = measurement.person_id
+  WHERE measurement.measurement_concept_id != 0
+    AND measurement.range_low IS NOT NULL
+    AND measurement.range_high IS NOT NULL
+{@excluded_concept_table != ''} ? {
+    AND measurement.measurement_concept_id NOT IN (SELECT id FROM @excluded_concept_table)
+}
+{@included_concept_table != ''} ? {
+    AND measurement.measurement_concept_id IN (SELECT id FROM @included_concept_table)
+}
+{@cohort_definition_id != -1} ? {
+    AND cohort.cohort_definition_id IN (@cohort_definition_id)
+}
+),
+clamped_events AS (
+  SELECT me.*,
+    CASE WHEN me.day_offset < tb.min_start_day THEN tb.min_start_day ELSE me.day_offset END AS clamped_start_offset,
+    CASE WHEN me.day_offset > tb.max_end_day THEN tb.max_end_day ELSE me.day_offset END AS clamped_end_offset
+  FROM measurement_events me
+  CROSS JOIN time_bounds tb
+  WHERE me.day_offset >= tb.min_start_day
+    AND me.day_offset <= tb.max_end_day
+),
+window_events AS (
+  SELECT
+    ce.cohort_definition_id,
+    ce.subject_id,
+    ce.cohort_start_date,
+    ce.row_id,
+    ce.measurement_concept_id,
+    ce.range_group,
+    wm.time_id
+  FROM clamped_events ce
+  INNER JOIN #atomic_intervals ai
+    ON ce.clamped_start_offset <= ai.end_day
+    AND ce.clamped_end_offset >= ai.start_day
+  INNER JOIN #window_interval_map wm
+    ON ai.interval_id = wm.interval_id
+),
+subject_events AS (
+  SELECT DISTINCT
+    window_events.cohort_definition_id,
+    window_events.subject_id,
+    window_events.cohort_start_date,
+    window_events.measurement_concept_id,
+    window_events.range_group,
+    window_events.time_id
+  FROM window_events
+)
+{@aggregated} ? {
+SELECT 
+  CAST(subject_events.measurement_concept_id AS BIGINT) * 10000 + (subject_events.range_group * 1000) + @analysis_id AS covariate_id,
+  subject_events.time_id,
+  subject_events.cohort_definition_id,
+  COUNT(*) AS sum_value
+INTO @covariate_table
+FROM subject_events
+{@included_cov_table != ''} ? {
+WHERE CAST(subject_events.measurement_concept_id AS BIGINT) * 10000 + (subject_events.range_group * 1000) + @analysis_id IN (SELECT id FROM @included_cov_table)
+}
+GROUP BY subject_events.measurement_concept_id,
+  subject_events.range_group,
+  subject_events.cohort_definition_id,
+  subject_events.time_id;
+} : {
+SELECT 
+  CAST(distinct_events.measurement_concept_id AS BIGINT) * 10000 + (distinct_events.range_group * 1000) + @analysis_id AS covariate_id,
+  distinct_events.time_id,
+  distinct_events.row_id,
+  1 AS covariate_value 
+INTO @covariate_table
+FROM (
+  SELECT DISTINCT
+    window_events.row_id,
+    window_events.measurement_concept_id,
+    window_events.range_group,
+    window_events.time_id
+  FROM window_events
+) distinct_events
+{@included_cov_table != ''} ? {
+WHERE CAST(distinct_events.measurement_concept_id AS BIGINT) * 10000 + (distinct_events.range_group * 1000) + @analysis_id IN (SELECT id FROM @included_cov_table)
+}
+;
+}
+} : {
 SELECT 
 	(CAST(measurement_concept_id AS BIGINT) * 10000) + (range_group * 1000) + @analysis_id AS covariate_id,
 {@temporal} ? {
@@ -74,6 +179,8 @@ GROUP BY measurement_concept_id,
     ,time_id
 } 
 ;
+}
+
 
 -- Reference construction
 INSERT INTO #cov_ref (

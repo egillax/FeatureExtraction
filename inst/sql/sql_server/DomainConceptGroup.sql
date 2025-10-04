@@ -69,40 +69,29 @@ WHERE
 }
 
 -- Feature construction
-SELECT 
-	CAST(ancestor_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
-{@temporal | @temporal_sequence} ? {
-    time_id,
-}	
-{@aggregated} ? {
-	cohort_definition_id,
-	COUNT(*) AS sum_value
-} : {
-	row_id,
-	1 AS covariate_value 
-}
-INTO @covariate_table
-FROM (
-	SELECT DISTINCT ancestor_concept_id,
 {@temporal} ? {
-		time_id,
-}	
-{@temporal_sequence} ? {
-FLOOR(DATEDIFF(@time_part, @cdm_database_schema.@domain_table.@domain_start_date, cohort.cohort_start_date)*1.0/@time_interval) as time_id,
-}
+WITH time_bounds AS (
+  SELECT min_start_day, max_end_day
+  FROM #time_window_bounds
+),
+raw_events AS (
+  SELECT DISTINCT
+    groups.ancestor_concept_id,
 {@aggregated} ? {
-		cohort_definition_id,
-		cohort.subject_id,
-		cohort.cohort_start_date
+    cohort.cohort_definition_id,
+    cohort.subject_id,
+    cohort.cohort_start_date,
 } : {
-		cohort.@row_id_field AS row_id
-}	
-	FROM @cohort_table cohort
-	INNER JOIN @cdm_database_schema.@domain_table
-		ON cohort.subject_id = @domain_table.person_id
-	INNER JOIN #groups
-		ON @domain_concept_id = descendant_concept_id
-{@sub_type == 'inpatient'} ? {	
+    cohort.@row_id_field AS row_id,
+}
+    DATEDIFF(DAY, cohort.cohort_start_date, @domain_table.@domain_start_date) AS start_offset,
+    DATEDIFF(DAY, cohort.cohort_start_date, @domain_table.@domain_end_date) AS end_offset
+  FROM @cohort_table cohort
+  INNER JOIN @cdm_database_schema.@domain_table
+    ON cohort.subject_id = @domain_table.person_id
+  INNER JOIN #groups groups
+    ON @domain_concept_id = groups.descendant_concept_id
+{@sub_type == 'inpatient'} ? {
   INNER JOIN @cdm_database_schema.visit_occurrence vo
     ON vo.person_id = @domain_table.person_id
     AND vo.visit_start_date <= @domain_table.@domain_start_date
@@ -110,31 +99,140 @@ FLOOR(DATEDIFF(@time_part, @cdm_database_schema.@domain_table.@domain_start_date
   INNER JOIN @cdm_database_schema.concept_ancestor ca
     ON ca.ancestor_concept_id IN (9201, 38004311, 8920, 262)
     AND ca.descendant_concept_id = vo.visit_concept_id
-}		
-{@temporal} ? {
-	INNER JOIN #time_period time_period
-		ON @domain_start_date <= DATEADD(DAY, time_period.end_day, cohort.cohort_start_date)
-		AND @domain_end_date >= DATEADD(DAY, time_period.start_day, cohort.cohort_start_date)
-	WHERE @domain_concept_id != 0
-} : {
-	WHERE @domain_start_date <= DATEADD(DAY,{@temporal_sequence} ? {@sequence_end_day} :{ @end_day}, cohort.cohort_start_date)
-{@start_day != 'anyTimePrior'} ? {				
-AND 
-{@temporal_sequence} ? {@domain_start_date } : {@domain_end_date }
->= DATEADD(DAY, {@temporal_sequence} ? {@sequence_start_day} : {@start_day}, cohort.cohort_start_date)}
-		AND @domain_concept_id != 0
 }
-{@included_cov_table != ''} ? {		AND CAST(ancestor_concept_id AS BIGINT) * 1000 + @analysis_id IN (SELECT id FROM @included_cov_table)}
-{@cohort_definition_id != -1} ? {		AND cohort.cohort_definition_id IN (@cohort_definition_id)}
-) temp
-{@aggregated} ? {		
-GROUP BY cohort_definition_id,
-	ancestor_concept_id
-{@temporal | @temporal_sequence} ? {
-    ,time_id
-}	
+  WHERE @domain_concept_id != 0
+{@excluded_concept_table != ''} ? {
+    AND @domain_concept_id NOT IN (SELECT id FROM @excluded_concept_table)
+}
+{@included_concept_table != ''} ? {
+    AND @domain_concept_id IN (SELECT id FROM @included_concept_table)
+}
+{@cohort_definition_id != -1} ? {
+    AND cohort.cohort_definition_id IN (@cohort_definition_id)
+}
+),
+clamped_events AS (
+  SELECT re.*,
+    CASE WHEN re.start_offset < tb.min_start_day THEN tb.min_start_day ELSE re.start_offset END AS clamped_start_offset,
+    CASE WHEN re.end_offset > tb.max_end_day THEN tb.max_end_day ELSE re.end_offset END AS clamped_end_offset
+  FROM raw_events re
+  CROSS JOIN time_bounds tb
+  WHERE re.end_offset >= tb.min_start_day
+    AND re.start_offset <= tb.max_end_day
+),
+window_events AS (
+  SELECT DISTINCT
+    ce.ancestor_concept_id,
+{@aggregated} ? {
+    ce.cohort_definition_id,
+    ce.subject_id,
+    ce.cohort_start_date,
+} : {
+    ce.row_id,
+}
+    wm.time_id
+  FROM clamped_events ce
+  INNER JOIN #atomic_intervals ai
+    ON ce.clamped_start_offset <= ai.end_day
+    AND ce.clamped_end_offset >= ai.start_day
+  INNER JOIN #window_interval_map wm
+    ON ai.interval_id = wm.interval_id
+)
+{@aggregated} ? {
+SELECT
+  CAST(window_events.ancestor_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
+  window_events.time_id,
+  window_events.cohort_definition_id,
+  COUNT(*) AS sum_value
+INTO @covariate_table
+FROM window_events
+{@included_cov_table != ''} ? {
+WHERE CAST(window_events.ancestor_concept_id AS BIGINT) * 1000 + @analysis_id IN (SELECT id FROM @included_cov_table)
+}
+GROUP BY window_events.ancestor_concept_id,
+  window_events.cohort_definition_id,
+  window_events.time_id;
+} : {
+SELECT
+  CAST(window_events.ancestor_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
+  window_events.time_id,
+  window_events.row_id,
+  1 AS covariate_value
+INTO @covariate_table
+FROM window_events
+{@included_cov_table != ''} ? {
+WHERE CAST(window_events.ancestor_concept_id AS BIGINT) * 1000 + @analysis_id IN (SELECT id FROM @included_cov_table)
 }
 ;
+}
+} : {
+SELECT 
+  CAST(base.ancestor_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
+{@temporal_sequence} ? {
+  base.time_id,
+}
+{@aggregated} ? {
+  base.cohort_definition_id,
+  COUNT(*) AS sum_value
+} : {
+  base.row_id,
+  1 AS covariate_value
+}
+INTO @covariate_table
+FROM (
+  SELECT DISTINCT
+    groups.ancestor_concept_id,
+{@temporal_sequence} ? {
+    FLOOR(DATEDIFF(@time_part, @cdm_database_schema.@domain_table.@domain_start_date, cohort.cohort_start_date) * 1.0 / @time_interval) AS time_id,
+}
+{@aggregated} ? {
+    cohort.cohort_definition_id,
+    cohort.subject_id,
+    cohort.cohort_start_date
+} : {
+    cohort.@row_id_field AS row_id
+}
+  FROM @cohort_table cohort
+  INNER JOIN @cdm_database_schema.@domain_table
+    ON cohort.subject_id = @domain_table.person_id
+  INNER JOIN #groups groups
+    ON @domain_concept_id = groups.descendant_concept_id
+{@sub_type == 'inpatient'} ? {
+  INNER JOIN @cdm_database_schema.visit_occurrence vo
+    ON vo.person_id = @domain_table.person_id
+    AND vo.visit_start_date <= @domain_table.@domain_start_date
+    AND vo.visit_end_date >= @domain_table.@domain_start_date
+  INNER JOIN @cdm_database_schema.concept_ancestor ca
+    ON ca.ancestor_concept_id IN (9201, 38004311, 8920, 262)
+    AND ca.descendant_concept_id = vo.visit_concept_id
+}
+  WHERE @domain_start_date <= DATEADD(DAY, {@temporal_sequence} ? {@sequence_end_day} : {@end_day}, cohort.cohort_start_date)
+{@start_day != 'anyTimePrior'} ? {
+    AND {@temporal_sequence} ? {@domain_start_date} : {@domain_end_date} >= DATEADD(DAY, {@temporal_sequence} ? {@sequence_start_day} : {@start_day}, cohort.cohort_start_date)
+}
+    AND @domain_concept_id != 0
+{@excluded_concept_table != ''} ? {
+    AND @domain_concept_id NOT IN (SELECT id FROM @excluded_concept_table)
+}
+{@included_concept_table != ''} ? {
+    AND @domain_concept_id IN (SELECT id FROM @included_concept_table)
+}
+{@cohort_definition_id != -1} ? {
+    AND cohort.cohort_definition_id IN (@cohort_definition_id)
+}
+) base
+{@included_cov_table != ''} ? {
+WHERE CAST(base.ancestor_concept_id AS BIGINT) * 1000 + @analysis_id IN (SELECT id FROM @included_cov_table)
+}
+{@aggregated} ? {
+GROUP BY base.ancestor_concept_id,
+  base.cohort_definition_id
+{@temporal_sequence} ? {
+  ,base.time_id
+}
+}
+;
+}
 TRUNCATE TABLE #groups;
 
 DROP TABLE #groups;
