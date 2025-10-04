@@ -1,4 +1,5 @@
 -- Feature construction
+{@temporal} ? {CREATE INDEX idx_time_period_join ON #time_period (start_day, end_day);}
 {@aggregated} ? {
 IF OBJECT_ID('tempdb..#concept_count_data', 'U') IS NOT NULL
 	DROP TABLE #concept_count_data;
@@ -12,36 +13,33 @@ IF OBJECT_ID('tempdb..#concept_count_prep', 'U') IS NOT NULL
 IF OBJECT_ID('tempdb..#concept_count_prep2', 'U') IS NOT NULL
 	DROP TABLE #concept_count_prep2;
 
-SELECT cohort_definition_id,
-	subject_id,
-	cohort_start_date,
+WITH
 {@temporal} ? {
-    time_period.time_id,
-}	
-{@sub_type == 'stratified'} ? {
-	covariate_id,
+time_window_bounds AS (
+	SELECT
+		MIN(start_day) AS min_start_day,
+		MAX(end_day) AS max_end_day
+	FROM #time_period
+),
+time_window_unique AS (
+	SELECT DISTINCT start_day, end_day
+	FROM #time_period
+),
 }
-	concept_count
-INTO #concept_count_data
-} : {
-{@sub_type == 'stratified'} ? {
-SELECT covariate_id,
-} : {
-SELECT CAST(1000 + @analysis_id AS BIGINT) AS covariate_id,
-}
-{@temporal} ? {
-	time_period.time_id,
-}	
-	row_id,
-	concept_count AS covariate_value
-INTO @covariate_table	
-}
-FROM (
+raw_data AS (
 SELECT 
 {@temporal} ? {
 		DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) AS start_day_offset,
 		DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) AS end_day_offset,
-}	
+		CASE
+			WHEN DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) < time_window_bounds.min_start_day THEN time_window_bounds.min_start_day
+			ELSE DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date)
+		END AS clamped_start_offset,
+		CASE
+			WHEN DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) > time_window_bounds.max_end_day THEN time_window_bounds.max_end_day
+			ELSE DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date)
+		END AS clamped_end_offset,
+}
 {@sub_type == 'stratified'} ? {
 		CAST(@domain_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
 }
@@ -61,11 +59,15 @@ SELECT
 	INNER JOIN @cdm_database_schema.@domain_table
 		ON cohort.subject_id = @domain_table.person_id
 {@temporal} ? {
+	CROSS JOIN time_window_bounds
+}
 	WHERE @domain_concept_id != 0
+{@temporal} ? {
+	AND DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) >= time_window_bounds.min_start_day
+	AND DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) <= time_window_bounds.max_end_day
 } : {
-	WHERE @domain_start_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
+	AND @domain_start_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
 		AND @domain_end_date >= DATEADD(DAY, @start_day, cohort.cohort_start_date)
-		AND @domain_concept_id != 0
 }
 {@excluded_concept_table != ''} ? {		AND @domain_concept_id NOT IN (SELECT id FROM @excluded_concept_table)}
 {@included_concept_table != ''} ? {		AND @domain_concept_id IN (SELECT id FROM @included_concept_table)}
@@ -74,7 +76,7 @@ SELECT
 {@temporal} ? {
 		start_day_offset,
 		end_day_offset,
-}	
+}
 {@sub_type == 'stratified'} ? {
 		@domain_concept_id,
 } 
@@ -85,12 +87,50 @@ SELECT
 } : {
 
 		cohort.@row_id_field		
-}	
+	}
 	) raw_data
+{@aggregated} ? {
+SELECT cohort_definition_id,
+	subject_id,
+	cohort_start_date,
 {@temporal} ? {
+	time_period.time_id,
+
+{@sub_type == 'stratified'} ? {
+	covariate_id,
+}
+	concept_count
+INTO #concept_count_data
+FROM raw_data
+{@temporal} ? {
+INNER JOIN time_window_unique time_window
+	ON raw_data.clamped_start_offset <= time_window.end_day
+	AND raw_data.clamped_end_offset >= time_window.start_day
 INNER JOIN #time_period time_period
-	ON raw_data.start_day_offset <= time_period.end_day
-	AND raw_data.end_day_offset >= time_period.start_day
+	ON time_period.start_day = time_window.start_day
+	AND time_period.end_day = time_window.end_day
+}
+} : {
+{@sub_type == 'stratified'} ? {
+SELECT covariate_id,
+} : {
+SELECT CAST(1000 + @analysis_id AS BIGINT) AS covariate_id,
+}
+{@temporal} ? {
+	time_period.time_id,
+}
+	row_id,
+		concept_count AS covariate_value
+INTO @covariate_table
+FROM raw_data
+{@temporal} ? {
+INNER JOIN time_window_unique time_window
+	ON raw_data.clamped_start_offset <= time_window.end_day
+	AND raw_data.clamped_end_offset >= time_window.start_day
+INNER JOIN #time_period time_period
+	ON time_period.start_day = time_window.start_day
+	AND time_period.end_day = time_window.end_day
+}
 }
 ;
 

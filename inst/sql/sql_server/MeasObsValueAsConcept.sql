@@ -1,3 +1,4 @@
+{@temporal} ? {CREATE INDEX idx_time_period_join ON #time_period (start_day, end_day);}
 -- Feature construction
 -- For description of covariate_id computation, see extras/TestHashForPostcoordinatedConcepts.R
 DROP TABLE IF EXISTS #temp_features;
@@ -36,10 +37,23 @@ FROM (
 	INNER JOIN @cdm_database_schema.@domain_table
 		ON cohort.subject_id = @domain_table.person_id
 {@temporal} ? {
+	CROSS JOIN (
+		SELECT MIN(start_day) AS min_start_day,
+			MAX(end_day) AS max_end_day
+		FROM #time_period
+	) time_window_bounds
+	INNER JOIN (
+		SELECT DISTINCT start_day, end_day
+		FROM #time_period
+	) time_window
+		ON DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) <= time_window.end_day
+		AND DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) >= time_window.start_day
 	INNER JOIN #time_period time_period
-		ON @domain_start_date <= DATEADD(DAY, time_period.end_day, cohort.cohort_start_date)
-		AND @domain_start_date >= DATEADD(DAY, time_period.start_day, cohort.cohort_start_date)
+		ON time_period.start_day = time_window.start_day
+		AND time_period.end_day = time_window.end_day
 	WHERE @domain_concept_id != 0
+		AND DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) <= time_window_bounds.max_end_day
+		AND DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) >= time_window_bounds.min_start_day
 } : {
 	WHERE @domain_start_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
 {@start_day != 'anyTimePrior'} ? {				AND @domain_start_date >= DATEADD(DAY, @start_day, cohort.cohort_start_date)}

@@ -6,7 +6,22 @@ DROP TABLE IF EXISTS #occ_count_prep;
 DROP TABLE IF EXISTS #occ_count_prep2;
 }
 
-WITH filtered AS (
+{@temporal} ? {CREATE INDEX idx_time_period_join ON #time_period (start_day, end_day);}
+
+WITH
+{@temporal} ? {
+time_window_bounds AS (
+	SELECT
+		MIN(start_day) AS min_start_day,
+		MAX(end_day) AS max_end_day
+	FROM #time_period
+),
+time_window_unique AS (
+	SELECT DISTINCT start_day, end_day
+	FROM #time_period
+),
+}
+filtered AS (
 	SELECT
 		covariate_cohort.cohort_definition_id AS covariate_cohort_definition_id,
 		main_cohort.cohort_definition_id AS main_cohort_definition_id,
@@ -18,6 +33,39 @@ WITH filtered AS (
 			WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
 			ELSE covariate_cohort.cohort_end_date
 		END AS covariate_end_date,
+{@temporal} ? {
+		DATEDIFF(DAY, main_cohort.cohort_start_date, covariate_cohort.cohort_start_date) AS start_day_offset,
+		DATEDIFF(
+			DAY,
+			main_cohort.cohort_start_date,
+			CASE
+				WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
+				ELSE covariate_cohort.cohort_end_date
+			END
+		) AS end_day_offset,
+		CASE
+			WHEN DATEDIFF(DAY, main_cohort.cohort_start_date, covariate_cohort.cohort_start_date) < time_window_bounds.min_start_day THEN time_window_bounds.min_start_day
+			ELSE DATEDIFF(DAY, main_cohort.cohort_start_date, covariate_cohort.cohort_start_date)
+		END AS clamped_start_offset,
+		CASE
+			WHEN DATEDIFF(
+				DAY,
+				main_cohort.cohort_start_date,
+				CASE
+					WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
+					ELSE covariate_cohort.cohort_end_date
+				END
+			) > time_window_bounds.max_end_day THEN time_window_bounds.max_end_day
+			ELSE DATEDIFF(
+				DAY,
+				main_cohort.cohort_start_date,
+				CASE
+					WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
+					ELSE covariate_cohort.cohort_end_date
+				END
+			)
+		END AS clamped_end_offset,
+} : {
 		DATEDIFF(DAY, main_cohort.cohort_start_date, covariate_cohort.cohort_start_date) AS start_day_offset,
 		DATEDIFF(
 			DAY,
@@ -27,13 +75,26 @@ WITH filtered AS (
 				ELSE covariate_cohort.cohort_end_date
 			END
 		) AS end_day_offset
+}
 	FROM @cohort_table main_cohort
 	INNER JOIN @covariate_cohort_table covariate_cohort
 		ON main_cohort.subject_id = covariate_cohort.subject_id
 	INNER JOIN #covariate_cohort_ref covariate_cohort_ref
 		ON covariate_cohort.cohort_definition_id = CAST(covariate_cohort_ref.cohort_id AS INT)
+{@temporal} ? {
+	CROSS JOIN time_window_bounds
+}
 	WHERE 1 = 1
 {@temporal} ? {
+	AND DATEDIFF(
+		DAY,
+		main_cohort.cohort_start_date,
+		CASE
+			WHEN covariate_cohort.cohort_end_date IS NULL THEN covariate_cohort.cohort_start_date
+			ELSE covariate_cohort.cohort_end_date
+		END
+	) >= time_window_bounds.min_start_day
+	AND DATEDIFF(DAY, main_cohort.cohort_start_date, covariate_cohort.cohort_start_date) <= time_window_bounds.max_end_day
 } : {
 	AND covariate_cohort.cohort_start_date <= DATEADD(DAY, @end_day, main_cohort.cohort_start_date)
 {@start_day != 'anyTimePrior'} ? {		
@@ -63,9 +124,12 @@ INTO @covariate_table
 }
 FROM filtered
 {@temporal} ? {
+INNER JOIN time_window_unique time_window
+	ON filtered.clamped_start_offset <= time_window.end_day
+	AND filtered.clamped_end_offset >= time_window.start_day
 INNER JOIN #time_period time_period
-	ON filtered.start_day_offset <= time_period.end_day
-	AND filtered.end_day_offset >= time_period.start_day
+	ON time_period.start_day = time_window.start_day
+	AND time_period.end_day = time_window.end_day
 }
 GROUP BY filtered.covariate_cohort_definition_id,
 {@temporal} ? {

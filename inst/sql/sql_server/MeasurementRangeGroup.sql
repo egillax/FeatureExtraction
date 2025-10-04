@@ -1,4 +1,18 @@
 -- Feature construction
+{@temporal} ? {CREATE INDEX idx_time_period_join ON #time_period (start_day, end_day);}
+{@temporal} ? {
+WITH
+time_window_bounds AS (
+	SELECT
+		MIN(start_day) AS min_start_day,
+		MAX(end_day) AS max_end_day
+	FROM #time_period
+),
+time_window_unique AS (
+	SELECT DISTINCT start_day, end_day
+	FROM #time_period
+)
+}
 SELECT 
 	(CAST(measurement_concept_id AS BIGINT) * 10000) + (range_group * 1000) + @analysis_id AS covariate_id,
 {@temporal} ? {
@@ -19,6 +33,8 @@ FROM (
 {@temporal} ? {
 		start_day_offset,
 		end_day_offset,
+		clamped_start_offset,
+		clamped_end_offset,
 }	
 		cohort_definition_id,
 		subject_id,
@@ -34,6 +50,14 @@ FROM (
 {@temporal} ? {
 		DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) AS start_day_offset,
 		DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) AS end_day_offset,
+		CASE
+			WHEN DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) < time_window_bounds.min_start_day THEN time_window_bounds.min_start_day
+			ELSE DATEDIFF(DAY, cohort.cohort_start_date, measurement_date)
+		END AS clamped_start_offset,
+		CASE
+			WHEN DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) > time_window_bounds.max_end_day THEN time_window_bounds.max_end_day
+			ELSE DATEDIFF(DAY, cohort.cohort_start_date, measurement_date)
+		END AS clamped_end_offset,
 }	
 {@aggregated} ? {
 		cohort_definition_id,
@@ -45,8 +69,13 @@ FROM (
 	FROM @cohort_table cohort
 	INNER JOIN @cdm_database_schema.measurement
 		ON cohort.subject_id = measurement.person_id
+{@temporal} ? {
+	CROSS JOIN time_window_bounds
+}
 	WHERE measurement_concept_id != 0
 {@temporal} ? {
+	AND DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) >= time_window_bounds.min_start_day
+	AND DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) <= time_window_bounds.max_end_day
 } : {
 	AND measurement_date <= DATEADD(DAY, @end_day, cohort.cohort_start_date)
 {@start_day != 'anyTimePrior'} ? {				AND measurement_date >= DATEADD(DAY, @start_day, cohort.cohort_start_date)}
@@ -61,9 +90,12 @@ FROM (
 }
 ) grouped_2
 {@temporal} ? {
+INNER JOIN time_window_unique time_window
+	ON grouped_2.clamped_start_offset <= time_window.end_day
+	AND grouped_2.clamped_end_offset >= time_window.start_day
 INNER JOIN #time_period time_period
-	ON grouped_2.start_day_offset <= time_period.end_day
-	AND grouped_2.end_day_offset >= time_period.start_day
+	ON time_period.start_day = time_window.start_day
+	AND time_period.end_day = time_window.end_day
 }
 {@included_cov_table != ''} ? {WHERE (CAST(measurement_concept_id AS BIGINT) * 10000) + (range_group * 1000) + @analysis_id IN (SELECT id FROM @included_cov_table)}
 GROUP BY measurement_concept_id,

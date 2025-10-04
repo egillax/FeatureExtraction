@@ -1,4 +1,17 @@
--- Feature construction
+{@temporal} ? {CREATE INDEX idx_time_period_join ON #time_period (start_day, end_day);}
+{@temporal} ? {
+WITH
+time_window_bounds AS (
+	SELECT
+		MIN(start_day) AS min_start_day,
+		MAX(end_day) AS max_end_day
+	FROM #time_period
+),
+time_window_unique AS (
+	SELECT DISTINCT start_day, end_day
+	FROM #time_period
+)
+}
 SELECT 
 	CAST(@domain_concept_id AS BIGINT) * 1000 + @analysis_id AS covariate_id,
 {@temporal | @temporal_sequence} ? {
@@ -26,6 +39,14 @@ event_year FROM (
 {@temporal} ? {
 		DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) AS start_day_offset,
 		DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) AS end_day_offset,
+		CASE
+			WHEN DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) < time_window_bounds.min_start_day THEN time_window_bounds.min_start_day
+			ELSE DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date)
+		END AS clamped_start_offset,
+		CASE
+			WHEN DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) > time_window_bounds.max_end_day THEN time_window_bounds.max_end_day
+			ELSE DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date)
+		END AS clamped_end_offset,
 }
 {@temporal_sequence} ? {
 FLOOR(DATEDIFF(@time_part, @cdm_database_schema.@domain_table.@domain_start_date, cohort.cohort_start_date)*1.0/@time_interval ) as time_id,
@@ -52,8 +73,13 @@ DATEPART(year, @domain_table.@domain_start_date) event_year,
     ON ca.ancestor_concept_id IN (9201, 38004311, 8920, 262)
     AND ca.descendant_concept_id = vo.visit_concept_id
 }
+	{@temporal} ? {
+	CROSS JOIN time_window_bounds
+}
 	WHERE @domain_concept_id != 0
 {@temporal} ? {
+	AND DATEDIFF(DAY, cohort.cohort_start_date, @domain_end_date) >= time_window_bounds.min_start_day
+	AND DATEDIFF(DAY, cohort.cohort_start_date, @domain_start_date) <= time_window_bounds.max_end_day
 } : {
 	AND @domain_start_date <= DATEADD(DAY, {@temporal_sequence} ? {@sequence_end_day} : {@end_day}, cohort.cohort_start_date)
 {@start_day != 'anyTimePrior'} ? {		AND 
@@ -68,9 +94,12 @@ DATEPART(year, @domain_table.@domain_start_date) event_year,
 {@cohort_definition_id != -1} ? {		AND cohort.cohort_definition_id IN (@cohort_definition_id)}
 ) by_row_id
 {@temporal} ? {
+INNER JOIN time_window_unique time_window
+	ON by_row_id.clamped_start_offset <= time_window.end_day
+	AND by_row_id.clamped_end_offset >= time_window.start_day
 INNER JOIN #time_period time_period
-	ON by_row_id.start_day_offset <= time_period.end_day
-	AND by_row_id.end_day_offset >= time_period.start_day
+	ON time_period.start_day = time_window.start_day
+	AND time_period.end_day = time_window.end_day
 }
 {@temporal_annual} ? {
 ) by_year

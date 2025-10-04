@@ -16,13 +16,15 @@ WHERE value_as_number IS NOT NULL
 IF OBJECT_ID('tempdb..#meas_val_data', 'U') IS NOT NULL
 	DROP TABLE #meas_val_data;
 	
+{@temporal} ? {CREATE INDEX idx_time_period_join ON #time_period (start_day, end_day);}
+
 SELECT 
 {@aggregated} ? {
-		cohort_definition_id,
-		subject_id,
-		cohort_start_date,
+	cohort_definition_id,
+	subject_id,
+	cohort_start_date,
 } : {
-		row_id,
+	row_id,
 }
 {@temporal | @temporal_sequence} ? {
     time_id,
@@ -31,6 +33,18 @@ SELECT
 	value_as_number
 INTO #meas_val_data
 FROM (
+{@temporal} ? {
+WITH time_window_bounds AS (
+	SELECT
+		MIN(start_day) AS min_start_day,
+		MAX(end_day) AS max_end_day
+	FROM #time_period
+),
+time_window_unique AS (
+	SELECT DISTINCT start_day, end_day
+	FROM #time_period
+)
+}
 	SELECT 
 {@aggregated} ? {
 		cohort_definition_id,
@@ -69,10 +83,16 @@ ROW_NUMBER() OVER (PARTITION BY cohort.@row_id_field, measurement.measurement_co
 		ON meas_cov.measurement_concept_id = measurement.measurement_concept_id 
 			AND meas_cov.unit_concept_id = measurement.unit_concept_id 
 {@temporal} ? {
+	CROSS JOIN time_window_bounds
+	INNER JOIN time_window_unique time_window
+		ON DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) <= time_window.end_day
+		AND DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) >= time_window.start_day
 	INNER JOIN #time_period time_period
-		ON measurement_date <= DATEADD(DAY, time_period.end_day, cohort.cohort_start_date)
-		AND measurement_date >= DATEADD(DAY, time_period.start_day, cohort.cohort_start_date)
+		ON time_period.start_day = time_window.start_day
+		AND time_period.end_day = time_window.end_day
 	WHERE measurement.measurement_concept_id != 0 
+		AND DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) >= time_window_bounds.min_start_day
+		AND DATEDIFF(DAY, cohort.cohort_start_date, measurement_date) <= time_window_bounds.max_end_day
 } : {
 	WHERE measurement_date <= DATEADD(DAY, {@temporal_sequence} ? {@sequence_end_day} : {@end_day}, cohort.cohort_start_date)
 {@start_day != 'anyTimePrior'} ? {	AND measurement_date >= DATEADD(DAY, {@temporal_sequence} ? {@sequence_start_day} : {@start_day}, cohort.cohort_start_date)}
